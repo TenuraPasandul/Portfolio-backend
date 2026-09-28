@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Groq = require('groq-sdk');
 const crypto = require('crypto');
 const PortfolioData = require('./info');
 
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Build a detailed system prompt from portfolio data
 const systemPrompt = `You are Tenura's portfolio assistant chatbot embedded on his personal portfolio website.
@@ -70,7 +70,7 @@ let adminWs = null;
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'admin123';
 
 app.get('/', (req, res) => {
-    res.send('Gemini WebSocket server is running. Connect to ws://localhost:3000');
+    res.send('Groq WebSocket server is running. Connect to ws://localhost:3000');
 });
 
 wss.on('connection', (ws, req) => {
@@ -122,16 +122,14 @@ wss.on('connection', (ws, req) => {
     const sessionId = crypto.randomBytes(4).toString('hex');
     console.log(`New user connected: ${sessionId}`);
     
-    const model = genAI.getGenerativeModel({ 
-        model: "gemini-3.6-flash",
-        systemInstruction: systemPrompt,
-    });
-    
-    const chat = model.startChat({ history: [] });
+    // Groq uses a message history array instead of a stateful chat object
+    const chatHistory = [
+        { role: 'system', content: systemPrompt }
+    ];
 
     activeSessions.set(sessionId, {
         ws: ws,
-        chat: chat,
+        chatHistory: chatHistory,
         isHandoff: false
     });
 
@@ -157,16 +155,28 @@ wss.on('connection', (ws, req) => {
             }));
         }
 
-        // If Admin took over, bypass Gemini
+        // If Admin took over, bypass AI
         if (session && session.isHandoff) {
             return;
         }
 
-        // Send to Gemini
+        // Send to Groq
         try {
-            const result = await chat.sendMessage(userMessage);
-            const response = await result.response.text();
+            // Add user message to history
+            session.chatHistory.push({ role: 'user', content: userMessage });
+
+            const chatCompletion = await groq.chat.completions.create({
+                messages: session.chatHistory,
+                model: 'qwen/qwen3.8-27b',
+                temperature: 0.7,
+                max_tokens: 800,
+            });
+
+            const response = chatCompletion.choices[0]?.message?.content || 'Sorry, I could not generate a response.';
             
+            // Add assistant response to history for context
+            session.chatHistory.push({ role: 'assistant', content: response });
+
             console.log(`Bot [${sessionId}]: ${response}`);
 
             if (ws.readyState === WebSocket.OPEN) {
